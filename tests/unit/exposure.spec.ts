@@ -395,6 +395,188 @@ describe('模拟状态一致性（simulationBasis 指纹）', () => {
   }
 });
 
+describe('停照区间', () => {
+  /** 基础表单（08:00–10:00，50/70/50，总量 120）附加停照区间。 */
+  function blackoutForm(limit: string, blackouts: { start: string; end: string }[]): FormInput {
+    const form = baseForm();
+    form.limit = limit;
+    form.blackouts = blackouts;
+    return form;
+  }
+
+  it('跨测点停照：边界线性插值与精确扣除量', () => {
+    // 08:30–09:30 停照横跨 09:00 测点；08:30 与 09:30 的插值照度均为 60 lx
+    const { parsed, errors } = validateForm(
+      blackoutForm('120', [{ start: '2026-09-14T08:30', end: '2026-09-14T09:30' }]),
+    );
+    expect(countErrors(errors)).toBe(0);
+
+    const result = computeExposure(parsed!);
+    expect(result.segments).toHaveLength(2);
+    // 第一段 08:00–09:00（50→70）：有效 08:00–08:30 = (50+60)/2 × 30/60 = 27.5；
+    // 扣除 08:30–09:00 = (60+70)/2 × 30/60 = 32.5
+    expect(result.segments[0].minutes.toString()).toBe('60');
+    expect(result.segments[0].effectiveMinutes.toString()).toBe('30');
+    expect(result.segments[0].exposureRaw.toString()).toBe('27.5');
+    expect(result.segments[0].deductedRaw.toString()).toBe('32.5');
+    expect(fmt2(result.segments[0].exposure)).toBe('27.50');
+    expect(fmt2(result.segments[0].deducted)).toBe('32.50');
+    // 第二段 09:00–10:00（70→50）：扣除 09:00–09:30 = 32.5；有效 09:30–10:00 = 27.5
+    expect(result.segments[1].effectiveMinutes.toString()).toBe('30');
+    expect(result.segments[1].exposureRaw.toString()).toBe('27.5');
+    expect(result.segments[1].deductedRaw.toString()).toBe('32.5');
+
+    // 总量 55 = 原始 120 − 扣除 65，判定与差额基于有效总量
+    expect(result.totalRaw.toString()).toBe('55');
+    expect(fmt2(result.total)).toBe('55.00');
+    expect(result.deductedRaw.toString()).toBe('65');
+    expect(fmt2(result.deducted)).toBe('65.00');
+    expect(result.pass).toBe(true);
+    expect(result.diffKind).toBe('remaining');
+    expect(fmt2(result.diff)).toBe('65.00');
+    expect(result.blackouts).toHaveLength(1);
+  });
+
+  it('未填写停照区间时结果与当前版本完全一致', () => {
+    const plain = computeExposure(validateForm(baseForm()).parsed!);
+    // 显式空数组与缺省（undefined）两条路径
+    const withEmpty = computeExposure(validateForm(blackoutForm('120', [])).parsed!);
+
+    expect(withEmpty.totalRaw.toString()).toBe(plain.totalRaw.toString());
+    expect(withEmpty.segments.map((s) => s.exposureRaw.toString())).toEqual(
+      plain.segments.map((s) => s.exposureRaw.toString()),
+    );
+    expect(withEmpty.segments.map((s) => s.effectiveMinutes.toString())).toEqual(
+      plain.segments.map((s) => s.minutes.toString()),
+    );
+    expect(withEmpty.deductedRaw.toString()).toBe('0');
+    expect(fmt2(withEmpty.total)).toBe('120.00');
+    expect(withEmpty.blackouts).toHaveLength(0);
+  });
+
+  it('停照覆盖整个班次：有效总量为 0，扣除量等于原始总量', () => {
+    const { parsed, errors } = validateForm(
+      blackoutForm('120', [{ start: '2026-09-14T08:00', end: '2026-09-14T10:00' }]),
+    );
+    expect(countErrors(errors)).toBe(0);
+
+    const result = computeExposure(parsed!);
+    expect(result.totalRaw.toString()).toBe('0');
+    expect(result.deductedRaw.toString()).toBe('120');
+    expect(result.segments[0].effectiveMinutes.toString()).toBe('0');
+    expect(result.segments[1].effectiveMinutes.toString()).toBe('0');
+    expect(result.pass).toBe(true);
+    expect(fmt2(result.diff)).toBe('120.00');
+  });
+
+  it('首尾相接的区间合法，扣除量等同于合并后的单区间', () => {
+    const touching = validateForm(
+      blackoutForm('120', [
+        { start: '2026-09-14T08:00', end: '2026-09-14T08:30' },
+        { start: '2026-09-14T08:30', end: '2026-09-14T09:00' },
+      ]),
+    );
+    expect(countErrors(touching.errors)).toBe(0);
+
+    const merged = validateForm(
+      blackoutForm('120', [{ start: '2026-09-14T08:00', end: '2026-09-14T09:00' }]),
+    );
+    const a = computeExposure(touching.parsed!);
+    const b = computeExposure(merged.parsed!);
+    expect(a.totalRaw.toString()).toBe(b.totalRaw.toString());
+    expect(a.deductedRaw.toString()).toBe(b.deductedRaw.toString());
+    // 08:00–09:00 整段被扣除：扣除 60，有效总量 60
+    expect(a.deductedRaw.toString()).toBe('60');
+    expect(a.totalRaw.toString()).toBe('60');
+  });
+
+  it('非整除插值：十进制定点累加并按 0.01 舍入', () => {
+    // 08:10–08:45 停照：08:10 插值 50 + 20×(10/60) = 53.333…，08:45 插值 65
+    const { parsed } = validateForm(
+      blackoutForm('120', [{ start: '2026-09-14T08:10', end: '2026-09-14T08:45' }]),
+    );
+    const result = computeExposure(parsed!);
+    // 扣除 = (53.333…+65)/2 × 35/60 = 34.513888…；有效总量 = 120 − 34.513888… = 85.486111…
+    expect(fmt2(result.deducted)).toBe('34.51');
+    expect(fmt2(result.total)).toBe('85.49');
+    expect(result.segments[0].effectiveMinutes.toString()).toBe('25');
+    expect(result.segments[1].effectiveMinutes.toString()).toBe('60');
+  });
+
+  it('缺项、越界、顺序、重叠在一次提交中合并标出', () => {
+    const { parsed, errors } = validateForm(
+      blackoutForm('120', [
+        { start: '2026-09-14T08:10', end: '' }, // 缺结束
+        { start: '2026-09-14T07:00', end: '2026-09-14T08:20' }, // 开始早于班次
+        { start: '2026-09-14T09:00', end: '2026-09-14T08:30' }, // 结束早于开始
+        { start: '2026-09-14T08:40', end: '2026-09-14T09:10' }, // 与下一区间重叠
+        { start: '2026-09-14T09:00', end: '2026-09-14T09:20' },
+      ]),
+    );
+    expect(parsed).toBeNull();
+    expect(errors.blackoutErrors[0].end).toBe('请填写停照结束时间');
+    expect(errors.blackoutErrors[1].start).toBe('停照开始不得早于班次开始');
+    expect(errors.blackoutErrors[2].end).toBe('停照结束必须晚于停照开始');
+    expect(errors.blackoutErrors[3].overlap).toBe('停照区间不可重叠（可首尾相接）');
+    expect(errors.blackoutErrors[4].overlap).toBe('停照区间不可重叠（可首尾相接）');
+    expect(countErrors(errors)).toBe(5);
+  });
+
+  it('越界：停照结束晚于班次结束；起止恰等于班次起止则合法', () => {
+    const tooLate = validateForm(
+      blackoutForm('120', [{ start: '2026-09-14T09:30', end: '2026-09-14T10:30' }]),
+    );
+    expect(tooLate.parsed).toBeNull();
+    expect(tooLate.errors.blackoutErrors[0].end).toBe('停照结束不得晚于班次结束');
+
+    const exact = validateForm(
+      blackoutForm('120', [{ start: '2026-09-14T08:00', end: '2026-09-14T10:00' }]),
+    );
+    expect(countErrors(exact.errors)).toBe(0);
+  });
+
+  it('链式重叠：被前序合并区间覆盖的区间一并标出', () => {
+    const { parsed, errors } = validateForm(
+      blackoutForm('120', [
+        { start: '2026-09-14T08:00', end: '2026-09-14T09:30' },
+        { start: '2026-09-14T08:30', end: '2026-09-14T09:00' },
+        { start: '2026-09-14T09:00', end: '2026-09-14T10:00' },
+      ]),
+    );
+    expect(parsed).toBeNull();
+    expect(errors.blackoutErrors[0].overlap).toBe('停照区间不可重叠（可首尾相接）');
+    expect(errors.blackoutErrors[1].overlap).toBe('停照区间不可重叠（可首尾相接）');
+    expect(errors.blackoutErrors[2].overlap).toBe('停照区间不可重叠（可首尾相接）');
+  });
+
+  it('格式非法与缺开始时间被标出', () => {
+    const { parsed, errors } = validateForm(
+      blackoutForm('120', [
+        { start: '', end: '2026-09-14T09:00' },
+        { start: '2026-09-14 08:30', end: '2026-09-14T09:00' },
+      ]),
+    );
+    expect(parsed).toBeNull();
+    expect(errors.blackoutErrors[0].start).toBe('请填写停照开始时间');
+    expect(errors.blackoutErrors[1].start).toBe('停照开始须为精确到分钟的完整本地日期时间');
+  });
+
+  it('照度上限模拟仍以原始时间点为输入，不扣除停照区间', () => {
+    const form = crossDayForm('500');
+    form.blackouts = [{ start: '2026-09-14T23:00', end: '2026-09-15T01:00' }];
+    const { parsed, errors } = validateForm(form);
+    expect(countErrors(errors)).toBe(0);
+
+    // 与无停照时的模拟完全一致：原总量 600、模拟总量 500、减少量 100
+    const sim = simulateCap(parsed!, new Decimal(150));
+    expect(sim.result.totalRaw.toString()).toBe('500');
+    expect(fmt2(sim.result.total)).toBe('500.00');
+    expect(fmt2(sim.reduction)).toBe('100.00');
+    expect(sim.cappedLuxTexts).toEqual(['100', '150', '100']);
+    expect(sim.result.blackouts).toHaveLength(0);
+  });
+});
+
 describe('照度上限模拟', () => {
   describe('validateCapInput', () => {
     it('空值报错', () => {

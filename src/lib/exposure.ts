@@ -7,7 +7,9 @@ import { Decimal } from 'decimal.js';
  * - 相邻区间暴露量 = (前值 + 后值) ÷ 2 × 分钟差 ÷ 60，使用 decimal.js 十进制定点运算；
  * - 各段与总量展示时四舍五入到 0.01 lx·h，但总量必须先累加未舍入段值再舍入；
  * - 判定以未舍入的精确总量为准：精确总量 ≤ 限额判合格，否则超限（即使舍入后的
- *   显示值与限额相等）；剩余额 / 超出量按同一 0.01 规则展示。
+ *   显示值与限额相等）；剩余额 / 超出量按同一 0.01 规则展示；
+ * - 停照区间（临时遮光 / 关闭照明）按边界把测点段切分为子段，子段端点照度按相邻
+ *   测点线性插值，仅积分未被停照覆盖的部分；未填写停照区间时结果与未扣除完全一致。
  */
 
 export const LUX_MIN = new Decimal(0);
@@ -76,12 +78,20 @@ export interface RowInput {
   lux: string;
 }
 
+/** 停照区间录入：精确到分钟的本地日期时间文本。 */
+export interface BlackoutInput {
+  start: string;
+  end: string;
+}
+
 export interface FormInput {
   name: string;
   shiftStart: string;
   shiftEnd: string;
   limit: string;
   rows: RowInput[];
+  /** 零个或多个停照区间；缺省视为无停照 */
+  blackouts?: BlackoutInput[];
 }
 
 export interface RowErrors {
@@ -89,7 +99,14 @@ export interface RowErrors {
   lux?: string;
 }
 
-/** 一次提交的全部错误：字段级 + 逐行合并标出。 */
+export interface BlackoutErrors {
+  start?: string;
+  end?: string;
+  /** 区间整体错误（与其他停照区间重叠） */
+  overlap?: string;
+}
+
+/** 一次提交的全部错误：字段级 + 逐行 / 逐区间合并标出。 */
 export interface FormErrors {
   name?: string;
   shiftStart?: string;
@@ -99,6 +116,8 @@ export interface FormErrors {
   rows?: string;
   /** 与输入行一一对应 */
   rowErrors: RowErrors[];
+  /** 与停照区间一一对应 */
+  blackoutErrors: BlackoutErrors[];
 }
 
 export function countErrors(e: FormErrors): number {
@@ -112,6 +131,11 @@ export function countErrors(e: FormErrors): number {
     if (r.time) n += 1;
     if (r.lux) n += 1;
   }
+  for (const b of e.blackoutErrors) {
+    if (b.start) n += 1;
+    if (b.end) n += 1;
+    if (b.overlap) n += 1;
+  }
   return n;
 }
 
@@ -122,12 +146,20 @@ export interface ParsedRow {
   luxText: string;
 }
 
+/** 已解析的停照区间：start < end，起止均落在班次内，区间互不重叠。 */
+export interface ParsedBlackout {
+  start: Date;
+  end: Date;
+}
+
 export interface ParsedForm {
   name: string;
   shiftStart: Date;
   shiftEnd: Date;
   limit: Decimal;
   rows: ParsedRow[];
+  /** 已校验的停照区间，按开始时间升序 */
+  blackouts: ParsedBlackout[];
 }
 
 export interface ValidationResult {
@@ -137,7 +169,11 @@ export interface ValidationResult {
 }
 
 export function validateForm(input: FormInput): ValidationResult {
-  const errors: FormErrors = { rowErrors: input.rows.map(() => ({})) };
+  const blackoutInputs = input.blackouts ?? [];
+  const errors: FormErrors = {
+    rowErrors: input.rows.map(() => ({})),
+    blackoutErrors: blackoutInputs.map(() => ({})),
+  };
 
   // 展品名
   const name = input.name.trim();
@@ -243,6 +279,66 @@ export function validateForm(input: FormInput): ValidationResult {
     }
   }
 
+  // 停照区间：零个或多个；起止均落在班次内、开始早于结束、互不重叠（可首尾相接）
+  const blackouts: (ParsedBlackout | null)[] = blackoutInputs.map(() => null);
+  /** 可解析且开始早于结束的区间，参与重叠检测（越界区间也一并纳入，便于一次标出全部冲突） */
+  const ordered: { index: number; start: Date; end: Date }[] = [];
+
+  blackoutInputs.forEach((bl, i) => {
+    const blErr = errors.blackoutErrors[i];
+
+    const startText = bl.start.trim();
+    let start: Date | null = null;
+    if (!startText) {
+      blErr.start = '请填写停照开始时间';
+    } else {
+      start = parseLocalDateTime(startText);
+      if (!start) blErr.start = '停照开始须为精确到分钟的完整本地日期时间';
+    }
+
+    const endText = bl.end.trim();
+    let end: Date | null = null;
+    if (!endText) {
+      blErr.end = '请填写停照结束时间';
+    } else {
+      end = parseLocalDateTime(endText);
+      if (!end) blErr.end = '停照结束须为精确到分钟的完整本地日期时间';
+    }
+
+    if (start && end) {
+      if (end.getTime() <= start.getTime()) {
+        blErr.end = '停照结束必须晚于停照开始';
+      } else {
+        ordered.push({ index: i, start, end });
+        // 起止均须落在班次内（含边界）；班次起止无法解析时跳过边界检查
+        if (shiftStart && start.getTime() < shiftStart.getTime()) {
+          blErr.start = '停照开始不得早于班次开始';
+        }
+        if (shiftEnd && end.getTime() > shiftEnd.getTime()) {
+          blErr.end = '停照结束不得晚于班次结束';
+        }
+        if (!blErr.start && !blErr.end) blackouts[i] = { start, end };
+      }
+    }
+  });
+
+  // 重叠检测：按开始时间升序，与“当前最晚结束”的前序区间比较；
+  // 开始等于前序结束（首尾相接）不算重叠，冲突双方一次标出
+  ordered.sort((x, y) => {
+    const d = x.start.getTime() - y.start.getTime();
+    return d !== 0 ? d : x.end.getTime() - y.end.getTime();
+  });
+  let maxEndPos = -1;
+  for (let pos = 0; pos < ordered.length; pos += 1) {
+    const cur = ordered[pos];
+    if (maxEndPos >= 0 && cur.start.getTime() < ordered[maxEndPos].end.getTime()) {
+      const msg = '停照区间不可重叠（可首尾相接）';
+      errors.blackoutErrors[cur.index].overlap = msg;
+      errors.blackoutErrors[ordered[maxEndPos].index].overlap = msg;
+    }
+    if (maxEndPos < 0 || cur.end.getTime() > ordered[maxEndPos].end.getTime()) maxEndPos = pos;
+  }
+
   if (countErrors(errors) > 0) {
     return { errors, parsed: null };
   }
@@ -259,6 +355,9 @@ export function validateForm(input: FormInput): ValidationResult {
         lux: luxes[i] as Decimal,
         luxText: row.lux.trim(),
       })),
+      blackouts: (blackouts as ParsedBlackout[])
+        .slice()
+        .sort((x, y) => x.start.getTime() - y.start.getTime()),
     },
   };
 }
@@ -273,19 +372,32 @@ export interface SegmentResult {
   end: Date;
   startLuxText: string;
   endLuxText: string;
+  /** 测点段原始分钟数 */
   minutes: Decimal;
-  /** 未舍入段值 */
+  /** 扣除停照后的有效分钟数（无停照时等于 minutes） */
+  effectiveMinutes: Decimal;
+  /** 未舍入段值（仅积分未被停照覆盖的部分） */
   exposureRaw: Decimal;
   /** 展示用：四舍五入到 0.01 */
   exposure: Decimal;
+  /** 该段被停照覆盖部分的未舍入扣除量 */
+  deductedRaw: Decimal;
+  /** 展示用：四舍五入到 0.01 */
+  deducted: Decimal;
 }
 
 export interface ExposureResult {
   segments: SegmentResult[];
-  /** 未舍入总量 */
+  /** 未舍入总量（有效部分） */
   totalRaw: Decimal;
   /** 总量：先累加未舍入段值再四舍五入到 0.01 */
   total: Decimal;
+  /** 未舍入的总扣除量（停照覆盖部分） */
+  deductedRaw: Decimal;
+  /** 总扣除量：先累加未舍入扣除再四舍五入到 0.01 */
+  deducted: Decimal;
+  /** 本次核算生效的停照区间（按开始时间升序） */
+  blackouts: ParsedBlackout[];
   limit: Decimal;
   pass: boolean;
   /** 剩余额（合格）或超出量（超限），0.01 精度 */
@@ -293,17 +405,62 @@ export interface ExposureResult {
   diffKind: 'remaining' | 'excess';
 }
 
+/** 相邻测点间线性插值：t 时刻的照度（十进制定点）。端点处精确等于测点照度。 */
+function luxAt(a: ParsedRow, b: ParsedRow, t: Date): Decimal {
+  const totalMinutes = new Decimal(b.time.getTime() - a.time.getTime()).div(60000);
+  const elapsed = new Decimal(t.getTime() - a.time.getTime()).div(60000);
+  return a.lux.plus(b.lux.minus(a.lux).times(elapsed).div(totalMinutes));
+}
+
 export function computeExposure(parsed: ParsedForm): ExposureResult {
+  const blackouts = parsed.blackouts;
   const segments: SegmentResult[] = [];
   let totalRaw = new Decimal(0);
+  let deductedRaw = new Decimal(0);
 
   for (let i = 0; i < parsed.rows.length - 1; i += 1) {
     const a = parsed.rows[i];
     const b = parsed.rows[i + 1];
     const minutes = new Decimal(b.time.getTime() - a.time.getTime()).div(60000);
-    // (前值 + 后值) ÷ 2 × 分钟差 ÷ 60
-    const exposureRaw = a.lux.plus(b.lux).div(2).times(minutes).div(60);
+
+    // 停照区间边界把测点段切成子段；无停照时退化为单个子段，与原始算式逐项一致
+    const cuts: Date[] = [a.time];
+    for (const bl of blackouts) {
+      if (bl.start.getTime() > a.time.getTime() && bl.start.getTime() < b.time.getTime()) {
+        cuts.push(bl.start);
+      }
+      if (bl.end.getTime() > a.time.getTime() && bl.end.getTime() < b.time.getTime()) {
+        cuts.push(bl.end);
+      }
+    }
+    cuts.push(b.time);
+    cuts.sort((x, y) => x.getTime() - y.getTime());
+
+    let exposureRaw = new Decimal(0);
+    let segDeductedRaw = new Decimal(0);
+    let effectiveMinutes = new Decimal(0);
+
+    for (let k = 0; k < cuts.length - 1; k += 1) {
+      const t0 = cuts[k];
+      const t1 = cuts[k + 1];
+      const subMinutes = new Decimal(t1.getTime() - t0.getTime()).div(60000);
+      // (前值 + 后值) ÷ 2 × 分钟差 ÷ 60；子段端点照度按相邻测点线性插值
+      const part = luxAt(a, b, t0).plus(luxAt(a, b, t1)).div(2).times(subMinutes).div(60);
+      // 子段中点落在任一停照区间内即视为被覆盖（区间互不重叠，判定唯一）
+      const mid = (t0.getTime() + t1.getTime()) / 2;
+      const covered = blackouts.some(
+        (bl) => bl.start.getTime() <= mid && mid < bl.end.getTime(),
+      );
+      if (covered) {
+        segDeductedRaw = segDeductedRaw.plus(part);
+      } else {
+        exposureRaw = exposureRaw.plus(part);
+        effectiveMinutes = effectiveMinutes.plus(subMinutes);
+      }
+    }
+
     totalRaw = totalRaw.plus(exposureRaw);
+    deductedRaw = deductedRaw.plus(segDeductedRaw);
     segments.push({
       index: i,
       start: a.time,
@@ -311,8 +468,11 @@ export function computeExposure(parsed: ParsedForm): ExposureResult {
       startLuxText: a.luxText,
       endLuxText: b.luxText,
       minutes,
+      effectiveMinutes,
       exposureRaw,
       exposure: round2(exposureRaw),
+      deductedRaw: segDeductedRaw,
+      deducted: round2(segDeductedRaw),
     });
   }
 
@@ -325,6 +485,9 @@ export function computeExposure(parsed: ParsedForm): ExposureResult {
     segments,
     totalRaw,
     total,
+    deductedRaw,
+    deducted: round2(deductedRaw),
+    blackouts,
     limit: parsed.limit,
     pass,
     diff: round2(diff),
@@ -394,14 +557,17 @@ export interface CapSimulation {
 /**
  * 模拟统一调低现场照度上限：每个时间点照度取原值与上限的较小值，
  * 复用同一梯形积分与精确判定；减少量相对当前表格原值的精确总量计算。
+ * 模拟以本次正式核算的原始时间点为输入，不扣除停照区间。
  */
 export function simulateCap(parsed: ParsedForm, cap: Decimal): CapSimulation {
-  const original = computeExposure(parsed);
+  // 原总量与模拟总量均按完整照明曲线（原始时间点、无停照扣除）计算
+  const gross: ParsedForm = { ...parsed, blackouts: [] };
+  const original = computeExposure(gross);
 
   const cappedRows: ParsedRow[] = parsed.rows.map((row) =>
     row.lux.gt(cap) ? { ...row, lux: cap, luxText: cap.toString() } : row,
   );
-  const result = computeExposure({ ...parsed, rows: cappedRows });
+  const result = computeExposure({ ...gross, rows: cappedRows });
 
   const cappedPoints: CappedPoint[] = [];
   parsed.rows.forEach((row, i) => {

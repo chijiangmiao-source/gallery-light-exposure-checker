@@ -26,6 +26,8 @@ const capText = defineModel<string>('capText', { required: true });
 const verdictText = computed(() => (props.result.pass ? '合格' : '超限'));
 const diffLabel = computed(() => (props.result.pass ? '剩余额' : '超出量'));
 const simVerdictText = computed(() => (props.simulation?.result.pass ? '合格' : '超限'));
+/** 本次核算是否应用了停照区间（决定扣除量与有效时长列的展示） */
+const hasBlackouts = computed(() => props.result.blackouts.length > 0);
 
 function onSimulate(): void {
   emit('simulate', capText.value);
@@ -53,6 +55,10 @@ function onApply(): void {
           <dt>总量</dt>
           <dd><strong data-testid="total">{{ fmt2(result.total) }}</strong> lx·h</dd>
         </div>
+        <div v-if="hasBlackouts">
+          <dt>扣除量</dt>
+          <dd><strong data-testid="deducted">{{ fmt2(result.deducted) }}</strong> lx·h</dd>
+        </div>
         <div>
           <dt>限额</dt>
           <dd><strong data-testid="limit-value">{{ fmt2(result.limit) }}</strong> lx·h</dd>
@@ -64,12 +70,23 @@ function onApply(): void {
       </dl>
     </div>
 
+    <template v-if="hasBlackouts">
+      <h3>停照区间（{{ result.blackouts.length }}）</h3>
+      <ul class="blackout-list">
+        <li v-for="(bl, i) in result.blackouts" :key="i" data-testid="applied-blackout">
+          {{ fmtDateTime(bl.start) }} → {{ fmtDateTime(bl.end) }}
+        </li>
+      </ul>
+    </template>
+
     <h3>逐段算式</h3>
     <table class="segments">
       <thead>
         <tr>
           <th>区间（本地时间）</th>
           <th>算式 (前值＋后值) ÷ 2 × 分钟差 ÷ 60</th>
+          <th v-if="hasBlackouts">有效时长</th>
+          <th v-if="hasBlackouts">停照扣除</th>
           <th>段暴露量</th>
         </tr>
       </thead>
@@ -79,10 +96,22 @@ function onApply(): void {
           <td class="formula">
             ({{ seg.startLuxText }} + {{ seg.endLuxText }}) ÷ 2 × {{ seg.minutes.toString() }} min ÷ 60
           </td>
+          <td v-if="hasBlackouts" class="nowrap" data-testid="seg-effective">
+            {{ seg.effectiveMinutes.toString() }} min
+          </td>
+          <td v-if="hasBlackouts" class="nowrap" data-testid="seg-deducted">
+            {{ fmt2(seg.deducted) }} lx·h
+          </td>
           <td class="nowrap">{{ fmt2(seg.exposure) }} lx·h</td>
         </tr>
       </tbody>
     </table>
+
+    <p v-if="hasBlackouts" class="note">
+      停照扣除：区间边界按相邻测点间的线性照度曲线切分，仅积分未被停照覆盖的部分；
+      「段暴露量」为扣除后的有效值，「有效时长」为该段未被停照覆盖的分钟数，
+      「停照扣除」为该段被停照覆盖部分的暴露量。
+    </p>
 
     <p class="note">
       说明：各段显示值与总量均四舍五入到 0.01 lx·h；总量先累加未舍入段值再舍入，
@@ -338,6 +367,12 @@ h3 {
 
 .capped-list {
   margin: 0 0 4px;
+  padding-left: 20px;
+  font-size: 13.5px;
+}
+
+.blackout-list {
+  margin: 0 0 14px;
   padding-left: 20px;
   font-size: 13.5px;
 }

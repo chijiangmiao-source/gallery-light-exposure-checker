@@ -23,6 +23,7 @@ const form = reactive<FormInput>({
     { time: '', lux: '' },
     { time: '', lux: '' },
   ],
+  blackouts: [],
 });
 
 const errors = ref<FormErrors | null>(null);
@@ -94,6 +95,23 @@ function removeRow(index: number): void {
     capError.value = null;
     staleNotice.value = null;
   }
+}
+
+function blackoutHasError(index: number): boolean {
+  const blErr = errors.value?.blackoutErrors[index];
+  return Boolean(blErr?.start || blErr?.end || blErr?.overlap);
+}
+
+function addBlackout(): void {
+  form.blackouts?.push({ start: '', end: '' });
+  // 区间结构变化后旧错误索引不再对应，清除标记待下次提交重判；
+  // 停照区间不影响模拟（模拟以原始时间点为输入），既有模拟保持有效
+  errors.value = null;
+}
+
+function removeBlackout(index: number): void {
+  form.blackouts?.splice(index, 1);
+  errors.value = null;
 }
 
 function submit(): void {
@@ -277,6 +295,88 @@ function applySimulation(): void {
             </tr>
           </tbody>
         </table>
+
+        <h2>停照区间（可选）</h2>
+        <p class="hint">
+          临时遮光或关闭展柜照明的时段将从暴露量中扣除：起止均须落在班次内、开始早于结束，
+          区间不可重叠（可首尾相接）。不添加区间时，结果与未扣除完全一致。
+        </p>
+
+        <table v-if="form.blackouts && form.blackouts.length > 0" class="points">
+          <thead>
+            <tr>
+              <th class="col-index">#</th>
+              <th>停照开始（本地，精确到分钟）</th>
+              <th>停照结束（本地，精确到分钟）</th>
+              <th class="col-op"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="(bl, i) in form.blackouts"
+              :key="i"
+              data-testid="blackout-row"
+              :class="{ 'row-invalid': blackoutHasError(i) }"
+            >
+              <td class="col-index">{{ i + 1 }}</td>
+              <td>
+                <input
+                  v-model="bl.start"
+                  data-testid="blackout-start"
+                  type="datetime-local"
+                  step="60"
+                  :aria-label="`第 ${i + 1} 个停照开始`"
+                />
+                <p
+                  v-if="errors?.blackoutErrors[i]?.start"
+                  class="error"
+                  :data-testid="`blackout-${i}-start-error`"
+                >
+                  {{ errors.blackoutErrors[i].start }}
+                </p>
+                <p
+                  v-if="errors?.blackoutErrors[i]?.overlap"
+                  class="error"
+                  :data-testid="`blackout-${i}-overlap-error`"
+                >
+                  {{ errors.blackoutErrors[i].overlap }}
+                </p>
+              </td>
+              <td>
+                <input
+                  v-model="bl.end"
+                  data-testid="blackout-end"
+                  type="datetime-local"
+                  step="60"
+                  :aria-label="`第 ${i + 1} 个停照结束`"
+                />
+                <p
+                  v-if="errors?.blackoutErrors[i]?.end"
+                  class="error"
+                  :data-testid="`blackout-${i}-end-error`"
+                >
+                  {{ errors.blackoutErrors[i].end }}
+                </p>
+              </td>
+              <td class="col-op">
+                <button
+                  type="button"
+                  class="link"
+                  data-testid="remove-blackout"
+                  @click="removeBlackout(i)"
+                >
+                  删除
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="actions">
+          <button type="button" data-testid="add-blackout" @click="addBlackout">
+            ＋ 添加停照区间
+          </button>
+        </div>
 
         <div class="actions">
           <button type="button" data-testid="add-row" @click="addRow">＋ 添加时间点</button>

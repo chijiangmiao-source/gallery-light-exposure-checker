@@ -388,3 +388,99 @@ test('上限不匹配状态下输入非法值：最近一次有效模拟仍可�
   await expect(rows.nth(0).getByTestId('lux-input')).toHaveValue('40');
   await expect(rows.nth(1).getByTestId('lux-input')).toHaveValue('40');
 });
+
+test('超限班次添加停照区间：扣除后核算为合格并展示逐段有效时长与扣除量', async ({ page }) => {
+  // 08:00–10:00，50/70/50，总量 120，限额 100 → 超限 20
+  await fillBaseFormAndCompute(page, { limit: '100' });
+  await expect(page.getByTestId('verdict')).toHaveText('超限');
+  await expect(page.getByTestId('total')).toHaveText('120.00');
+  await expect(page.getByTestId('diff-label')).toHaveText('超出量');
+  await expect(page.getByTestId('diff')).toHaveText('20.00');
+
+  // 添加跨测点的停照区间 08:30–09:30（横跨 09:00 测点，共扣除 65 lx·h）
+  await page.getByTestId('add-blackout').click();
+  await expect(page.getByTestId('blackout-row')).toHaveCount(1);
+  await page.getByTestId('blackout-start').fill('2026-09-14T08:30');
+  await page.getByTestId('blackout-end').fill('2026-09-14T09:30');
+  await page.getByTestId('submit').click();
+
+  // 扣除后合格：有效总量 55，扣除量 65，剩余额 45
+  await expect(page.getByTestId('verdict')).toHaveText('合格');
+  await expect(page.getByTestId('total')).toHaveText('55.00');
+  await expect(page.getByTestId('deducted')).toHaveText('65.00');
+  await expect(page.getByTestId('diff-label')).toHaveText('剩余额');
+  await expect(page.getByTestId('diff')).toHaveText('45.00');
+
+  // 生效的停照区间列表
+  const applied = page.getByTestId('applied-blackout');
+  await expect(applied).toHaveCount(1);
+  await expect(applied.nth(0)).toContainText('2026-09-14 08:30 → 2026-09-14 09:30');
+
+  // 逐段有效时长与扣除量（两段各有效 30 分钟、各扣除 32.50）
+  const effective = page.getByTestId('seg-effective');
+  await expect(effective).toHaveCount(2);
+  await expect(effective.nth(0)).toHaveText('30 min');
+  await expect(effective.nth(1)).toHaveText('30 min');
+  const segDeducted = page.getByTestId('seg-deducted');
+  await expect(segDeducted).toHaveCount(2);
+  await expect(segDeducted.nth(0)).toHaveText('32.50 lx·h');
+  await expect(segDeducted.nth(1)).toHaveText('32.50 lx·h');
+  await expect(page.getByTestId('error-summary')).toHaveCount(0);
+});
+
+test('非法停照区间：合并标出、保留编辑内容且不污染旧结论', async ({ page }) => {
+  // 先做一次合法核算：总量 120 合格
+  await fillBaseFormAndCompute(page);
+  await expect(page.getByTestId('verdict')).toHaveText('合格');
+  await expect(page.getByTestId('total')).toHaveText('120.00');
+
+  // 添加五个非法区间：缺结束、开始早于班次、结束早于开始、两区间重叠
+  for (let i = 0; i < 5; i += 1) {
+    await page.getByTestId('add-blackout').click();
+  }
+  const rows = page.getByTestId('blackout-row');
+  await expect(rows).toHaveCount(5);
+  await rows.nth(0).getByTestId('blackout-start').fill('2026-09-14T08:10');
+  await rows.nth(1).getByTestId('blackout-start').fill('2026-09-14T07:00');
+  await rows.nth(1).getByTestId('blackout-end').fill('2026-09-14T08:20');
+  await rows.nth(2).getByTestId('blackout-start').fill('2026-09-14T09:00');
+  await rows.nth(2).getByTestId('blackout-end').fill('2026-09-14T08:30');
+  await rows.nth(3).getByTestId('blackout-start').fill('2026-09-14T08:40');
+  await rows.nth(3).getByTestId('blackout-end').fill('2026-09-14T09:10');
+  await rows.nth(4).getByTestId('blackout-start').fill('2026-09-14T09:00');
+  await rows.nth(4).getByTestId('blackout-end').fill('2026-09-14T09:20');
+  await page.getByTestId('submit').click();
+
+  // 一次标出全部相关区间（缺项 / 越界 / 顺序 / 重叠共 5 处）
+  await expect(page.getByTestId('error-summary')).toBeVisible();
+  await expect(page.getByTestId('error-summary')).toContainText('5 处错误');
+  await expect(page.getByTestId('blackout-0-end-error')).toHaveText('请填写停照结束时间');
+  await expect(page.getByTestId('blackout-1-start-error')).toHaveText('停照开始不得早于班次开始');
+  await expect(page.getByTestId('blackout-2-end-error')).toHaveText('停照结束必须晚于停照开始');
+  await expect(page.getByTestId('blackout-3-overlap-error')).toContainText('不可重叠');
+  await expect(page.getByTestId('blackout-4-overlap-error')).toContainText('不可重叠');
+
+  // 编辑内容保留，旧结论不被污染（仍是无停照的 120.00 合格）
+  await expect(rows.nth(0).getByTestId('blackout-start')).toHaveValue('2026-09-14T08:10');
+  await expect(rows.nth(4).getByTestId('blackout-end')).toHaveValue('2026-09-14T09:20');
+  await expect(page.getByTestId('verdict')).toHaveText('合格');
+  await expect(page.getByTestId('total')).toHaveText('120.00');
+  await expect(page.getByTestId('deducted')).toHaveCount(0);
+
+  // 修正：删除后四个区间，第一个改为合法的 08:30–09:00，重新核算才更新结果
+  for (let i = 4; i >= 1; i -= 1) {
+    await rows.nth(i).getByTestId('remove-blackout').click();
+  }
+  await expect(page.getByTestId('blackout-row')).toHaveCount(1);
+  await rows.nth(0).getByTestId('blackout-start').fill('2026-09-14T08:30');
+  await rows.nth(0).getByTestId('blackout-end').fill('2026-09-14T09:00');
+  await page.getByTestId('submit').click();
+
+  // 新结论：扣除 32.50，有效总量 87.50，剩余额 32.50
+  await expect(page.getByTestId('error-summary')).toHaveCount(0);
+  await expect(page.getByTestId('verdict')).toHaveText('合格');
+  await expect(page.getByTestId('total')).toHaveText('87.50');
+  await expect(page.getByTestId('deducted')).toHaveText('32.50');
+  await expect(page.getByTestId('diff-label')).toHaveText('剩余额');
+  await expect(page.getByTestId('diff')).toHaveText('32.50');
+});
