@@ -1,0 +1,20 @@
+name: exhibit-exposure
+
+services:
+  # 静态页面发布：http://localhost:${WEB_PORT:-8080}
+  web:
+    build:
+      context: .
+      target: web
+    image: exhibit-exposure-web
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    restart: unless-stopped
+
+  # 一次性验收：类型检查 + Vitest + Playwright，跑完即退出
+  # 用法：docker compose run --rm verify
+  verify:
+    build:
+      context: .
+      target: verify
+    image: exhibit-exposure-verify
