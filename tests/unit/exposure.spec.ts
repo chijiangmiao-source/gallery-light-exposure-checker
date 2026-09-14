@@ -7,6 +7,7 @@ import {
   fmtDateTime,
   parseLocalDateTime,
   simulateCap,
+  simulationBasis,
   validateCapInput,
   validateForm,
   type FormInput,
@@ -339,6 +340,59 @@ describe('表单校验', () => {
     expect(parsed).toBeNull();
     expect(errors.rowErrors[1].time).toBe('时间点须为精确到分钟的完整本地日期时间');
   });
+});
+
+describe('模拟状态一致性（simulationBasis 指纹）', () => {
+  it('未改动任何依据时，两次指纹相等且引用独立', () => {
+    const form = baseForm();
+    const a = simulationBasis(form);
+    const b = simulationBasis(form);
+    expect(a).toEqual(b);
+    expect(a).not.toBe(b);
+    expect(a.rows).not.toBe(b.rows);
+  });
+
+  it('班次时间点、限额、任一行时间点 / 照度变化都会改变指纹', () => {
+    const cases: Array<{ name: string; mutate: (f: FormInput) => void }> = [
+      { name: '班次开始', mutate: (f) => void (f.shiftStart = '2026-09-14T07:00') },
+      { name: '班次结束', mutate: (f) => void (f.shiftEnd = '2026-09-14T11:00') },
+      { name: '允许暴露量', mutate: (f) => void (f.limit = '999') },
+      { name: '某行照度', mutate: (f) => void (f.rows[1].lux = '66') },
+      { name: '某行时间点（同时改班次起止以保持边界一致）',
+        mutate: (f) => {
+          f.shiftStart = '2026-09-14T08:01';
+          f.shiftEnd = '2026-09-14T10:01';
+          f.rows.forEach((r) => {
+            if (r.time.endsWith('T08:00')) r.time = '2026-09-14T08:01';
+            if (r.time.endsWith('T09:00')) r.time = '2026-09-14T09:01';
+            if (r.time.endsWith('T10:00')) r.time = '2026-09-14T10:01';
+          });
+        } },
+    ];
+    for (const { name, mutate } of cases) {
+      const before = simulationBasis(baseForm());
+      const after = simulationBasis(mutateForm(baseForm(), mutate));
+      expect(after, name).not.toEqual(before);
+    }
+  });
+
+  it('不影响模拟数值的改动不改变指纹：展品名、首尾空格、新增空行前', () => {
+    const original = baseForm();
+    const withName = baseForm();
+    withName.name = '另一展品';
+    expect(simulationBasis(withName)).toEqual(simulationBasis(original));
+
+    const withSpaces = baseForm();
+    withSpaces.shiftStart = '  2026-09-14T08:00  ';
+    withSpaces.limit = ' 120 ';
+    withSpaces.rows[0].lux = ' 50 ';
+    expect(simulationBasis(withSpaces)).toEqual(simulationBasis(original));
+  });
+
+  function mutateForm(form: FormInput, mutate: (f: FormInput) => void): FormInput {
+    mutate(form);
+    return form;
+  }
 });
 
 describe('照度上限模拟', () => {

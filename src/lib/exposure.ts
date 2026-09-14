@@ -332,6 +332,26 @@ export function computeExposure(parsed: ParsedForm): ExposureResult {
   };
 }
 
+/**
+ * 模拟结论依赖的输入指纹：班次起止、允许暴露量与各行时间点 / 照度（展品名不影响数值）。
+ * 模拟结果仅在指纹保持不变时有效；任一项被修改，旧模拟即过期，必须撤销后重新模拟。
+ */
+export interface SimulationBasis {
+  shiftStart: string;
+  shiftEnd: string;
+  limit: string;
+  rows: { time: string; lux: string }[];
+}
+
+export function simulationBasis(input: FormInput): SimulationBasis {
+  return {
+    shiftStart: input.shiftStart.trim(),
+    shiftEnd: input.shiftEnd.trim(),
+    limit: input.limit.trim(),
+    rows: input.rows.map((row) => ({ time: row.time.trim(), lux: row.lux.trim() })),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 照度上限模拟
 // ---------------------------------------------------------------------------

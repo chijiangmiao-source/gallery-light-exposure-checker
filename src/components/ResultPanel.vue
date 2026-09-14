@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import { fmt2, fmtDateTime, type CapSimulation, type ExposureResult } from '../lib/exposure';
 
 const props = defineProps<{
@@ -7,6 +7,12 @@ const props = defineProps<{
   name: string;
   simulation: CapSimulation | null;
   capError: string | null;
+  /** 模拟过期提示：其依据被修改后方案已撤销 */
+  staleNotice: string | null;
+  /** 上限输入与已模拟方案是否不一致（改了上限但未重新模拟） */
+  capMismatch: boolean;
+  /** 不一致时的提示文案；仅输入为合法新上限时存在 */
+  mismatchNotice: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -14,18 +20,19 @@ const emit = defineEmits<{
   apply: [];
 }>();
 
-const capInput = ref('');
+// 上限输入文本提升到父组件持有，便于在输入与已模拟方案不一致时撤销方案
+const capText = defineModel<string>('capText', { required: true });
 
 const verdictText = computed(() => (props.result.pass ? '合格' : '超限'));
 const diffLabel = computed(() => (props.result.pass ? '剩余额' : '超出量'));
 const simVerdictText = computed(() => (props.simulation?.result.pass ? '合格' : '超限'));
 
 function onSimulate(): void {
-  emit('simulate', capInput.value);
+  emit('simulate', capText.value);
 }
 
 function onApply(): void {
-  capInput.value = '';
+  // 是否可应用由父组件按方案新鲜度裁决；输入文本由父组件在成功应用后清空
   emit('apply');
 }
 </script>
@@ -89,9 +96,9 @@ function onApply(): void {
         评估统一调低现场照度后展品能否合格：每个时间点照度取原值与上限的较小值，
         复用同一十进制梯形积分与精确判定，不改变表格与上方正式结论。
       </p>
-      <div class="sim-controls" :class="{ invalid: Boolean(capError) }">
+      <div class="sim-controls" :class="{ invalid: Boolean(capError || staleNotice || mismatchNotice) }">
         <input
-          v-model="capInput"
+          v-model="capText"
           data-testid="cap-input"
           type="text"
           inputmode="decimal"
@@ -101,6 +108,8 @@ function onApply(): void {
         <button type="button" data-testid="simulate" @click="onSimulate">模拟</button>
       </div>
       <p v-if="capError" class="error" data-testid="cap-error">{{ capError }}</p>
+      <p v-else-if="staleNotice" class="error" data-testid="sim-stale">{{ staleNotice }}</p>
+      <p v-else-if="mismatchNotice" class="error" data-testid="cap-mismatch">{{ mismatchNotice }}</p>
 
       <div v-if="simulation" class="sim-result" data-testid="simulation">
         <h4>模拟结果（上限 {{ simulation.cap.toString() }} lx）</h4>
@@ -136,10 +145,24 @@ function onApply(): void {
         </template>
         <p v-else class="hint" data-testid="no-capped">上限不低于任何时间点照度，无时间点被压低。</p>
 
-        <button type="button" class="primary" data-testid="apply-simulation" @click="onApply">
+        <button
+          type="button"
+          class="primary"
+          data-testid="apply-simulation"
+          :disabled="capMismatch"
+          :title="capMismatch ? '上限已修改但未重新模拟，不能应用旧方案' : ''"
+          @click="onApply"
+        >
           应用到表格
         </button>
-        <p class="hint">应用后模拟照度写回当前各行并清除模拟结果，请再次点击「核算」生成正式结论。</p>
+        <p class="hint">
+          <template v-if="capMismatch">
+            当前上限与方案不匹配，已拒绝应用；请重新模拟后再写回表格。
+          </template>
+          <template v-else>
+            应用后模拟照度写回当前各行并清除模拟结果，请再次点击「核算」生成正式结论。
+          </template>
+        </p>
       </div>
     </div>
   </section>

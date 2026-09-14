@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import ResultPanel from './components/ResultPanel.vue';
 import {
   computeExposure,
   countErrors,
   simulateCap,
+  simulationBasis,
   validateCapInput,
   validateForm,
   type CapSimulation,
@@ -28,11 +29,48 @@ const errors = ref<FormErrors | null>(null);
 const result = ref<ExposureResult | null>(null);
 const resultName = ref('');
 
-// 模拟照度上限：控件旁反馈与最近一次有效模拟
+// 模拟照度上限：输入文本、控件旁反馈与最近一次有效模拟
+const capText = ref('');
 const capError = ref<string | null>(null);
 const simulation = ref<CapSimulation | null>(null);
+/** 模拟过期原因：模拟所依据的表格 / 限额被改动后，旧方案不得再展示或应用 */
+const staleNotice = ref<string | null>(null);
 
 const errorCount = computed(() => (errors.value ? countErrors(errors.value) : 0));
+
+/** 模拟所依据的全部输入指纹；与生成模拟时的快照比较即可判定方案是否过期 */
+const currentBasis = computed(() => simulationBasis(form));
+
+function revokeSimulation(reason: string): void {
+  simulation.value = null;
+  staleNotice.value = reason;
+}
+
+// 模拟结果展示期间，其依据的任一字段（班次时间点、限额、各行时间点 / 照度）
+// 一旦被手动修改，旧模拟立即过期：撤销预计总量与判定，应用也随之不可用
+watch(
+  currentBasis,
+  () => {
+    if (simulation.value) revokeSimulation('模拟所依据的班次、限额或照度已修改，原模拟结果已撤销，请重新模拟');
+  },
+  { deep: true },
+);
+
+// 上限输入框改成与已模拟方案不同的合法新值但未重新模拟时，展示中的结果与输入
+// 不匹配：拒绝「应用到表格」回填旧上限方案；非法输入不在此列（按规则仅控件旁
+// 反馈，最近一次有效模拟不受影响），改回原上限或重新模拟后恢复可应用
+const capMismatch = computed(() => {
+  const sim = simulation.value;
+  if (!sim) return false;
+  const { cap } = validateCapInput(capText.value);
+  return cap !== null && cap.toString() !== sim.cap.toString();
+});
+
+const mismatchNotice = computed(() =>
+  capMismatch.value
+    ? '模拟照度上限已改为新数值但尚未重新模拟，请先点击「模拟」生成新方案，或改回原上限后再应用'
+    : null,
+);
 
 function rowHasError(index: number): boolean {
   const rowErrors = errors.value?.rowErrors[index];
@@ -45,6 +83,7 @@ function addRow(): void {
   errors.value = null;
   simulation.value = null;
   capError.value = null;
+  staleNotice.value = null;
 }
 
 function removeRow(index: number): void {
@@ -53,6 +92,7 @@ function removeRow(index: number): void {
     errors.value = null;
     simulation.value = null;
     capError.value = null;
+    staleNotice.value = null;
   }
 }
 
@@ -65,15 +105,16 @@ function submit(): void {
     // 新正式结论生成后，此前基于旧表格的模拟不再适用
     simulation.value = null;
     capError.value = null;
+    staleNotice.value = null;
   } else {
     // 合并标出全部错误行；保留输入，不更新旧结论
     errors.value = outcome.errors;
   }
 }
 
-function simulate(capText: string): void {
-  const { cap, error } = validateCapInput(capText);
-  if (!cap) {
+function simulate(cap: string): void {
+  const { cap: parsedCap, error } = validateCapInput(cap);
+  if (!parsedCap) {
     // 非法上限：仅在模拟控件旁反馈，不改表格、正式结论与最近一次有效模拟
     capError.value = error;
     return;
@@ -86,12 +127,18 @@ function simulate(capText: string): void {
   // 表格已通过完整校验，旧的错误标记随之失效
   errors.value = null;
   capError.value = null;
-  simulation.value = simulateCap(outcome.parsed, cap);
+  staleNotice.value = null;
+  // 规范化上限输入文本（如末位零、两侧空格），使输入框与方案上限严格匹配
+  capText.value = parsedCap.toString();
+  simulation.value = simulateCap(outcome.parsed, parsedCap);
 }
 
 function applySimulation(): void {
   const sim = simulation.value;
+  // 无有效方案（含已被撤销的过期方案）时拒绝回填
   if (!sim) return;
+  // 当前上限与方案不匹配（改成新值但未重新模拟）时，拒绝使用不匹配的旧方案
+  if (capMismatch.value) return;
   // 把模拟后的照度写回当前各行；班次、限额和展品名保持不变
   sim.cappedLuxTexts.forEach((lux, i) => {
     if (i < form.rows.length) form.rows[i].lux = lux;
@@ -99,6 +146,8 @@ function applySimulation(): void {
   // 清除模拟结果；正式结论待用户再按原核算按钮生成
   simulation.value = null;
   capError.value = null;
+  staleNotice.value = null;
+  capText.value = '';
 }
 </script>
 
@@ -244,8 +293,12 @@ function applySimulation(): void {
       v-if="result"
       :result="result"
       :name="resultName"
+      v-model:cap-text="capText"
       :simulation="simulation"
       :cap-error="capError"
+      :stale-notice="staleNotice"
+      :cap-mismatch="capMismatch"
+      :mismatch-notice="mismatchNotice"
       @simulate="simulate"
       @apply="applySimulation"
     />
