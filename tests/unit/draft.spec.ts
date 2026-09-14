@@ -88,13 +88,13 @@ describe('草稿契约：往返序列化', () => {
 
   it('半成品草稿（空字段、零停照区间）同样可往返：结构合法不代表业务合法', () => {
     const data = partialDraft();
-    const parsed = parseDraft(serializeDraft(data, ''));
+    const parsed = parseDraft(serializeDraft(data, '2026-09-14T12:34:56.000Z'));
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect(parsed.data).toEqual(data);
   });
 
   it('解析结果是规范化副本，修改返回对象不影响再次解析', () => {
-    const text = serializeDraft(fullDraft(), '');
+    const text = serializeDraft(fullDraft(), '2026-09-14T12:34:56.000Z');
     const a = parseDraft(text);
     const b = parseDraft(text);
     expect(a.ok && b.ok).toBe(true);
@@ -119,6 +119,11 @@ describe('草稿契约：损坏与拒绝', () => {
     ['契约版本为未来版 2', JSON.stringify({ contractVersion: 2, savedAt: '', data: fullDraft() })],
     ['契约版本为字符串', JSON.stringify({ contractVersion: '1', data: fullDraft() })],
     ['缺少 data', JSON.stringify({ contractVersion: 1 })],
+    ['缺少 savedAt', JSON.stringify({ contractVersion: 1, data: fullDraft() })],
+    ['savedAt 为空字符串', JSON.stringify({ contractVersion: 1, savedAt: '', data: fullDraft() })],
+    ['savedAt 为数字', JSON.stringify({ contractVersion: 1, savedAt: 123, data: fullDraft() })],
+    ['savedAt 为 null', JSON.stringify({ contractVersion: 1, savedAt: null, data: fullDraft() })],
+    ['savedAt 为不可解析字符串', JSON.stringify({ contractVersion: 1, savedAt: 'not-a-date', data: fullDraft() })],
     ['data 为数组', JSON.stringify({ contractVersion: 1, data: [] })],
     ['缺少展品名', JSON.stringify({ contractVersion: 1, data: { ...partialDraft(), name: undefined } })],
     [
@@ -203,16 +208,27 @@ describe('草稿契约：损坏与拒绝', () => {
     });
   }
 
-  it('savedAt 缺失或类型不符不影响负载恢复（簿记字段宽容处理）', () => {
-    const noSavedAt = JSON.stringify({ contractVersion: 1, data: fullDraft() });
-    const r1 = parseDraft(noSavedAt);
-    expect(r1.ok).toBe(true);
-    if (r1.ok) expect(r1.savedAt).toBeNull();
+  it('savedAt 缺失、类型错误或不可解析时整体拒绝：不恢复负载、不覆盖表单', () => {
+    const cases: unknown[] = [
+      JSON.stringify({ contractVersion: 1, data: fullDraft() }),
+      JSON.stringify({ contractVersion: 1, savedAt: '', data: fullDraft() }),
+      JSON.stringify({ contractVersion: 1, savedAt: 123, data: fullDraft() }),
+      JSON.stringify({ contractVersion: 1, savedAt: null, data: fullDraft() }),
+      JSON.stringify({ contractVersion: 1, savedAt: 'not-a-date', data: fullDraft() }),
+      JSON.stringify({ contractVersion: 1, savedAt: {}, data: fullDraft() }),
+    ];
+    for (const text of cases) {
+      expect(parseDraft(text as string)).toEqual({ ok: false });
+    }
+  });
 
-    const badSavedAt = JSON.stringify({ contractVersion: 1, savedAt: 123, data: fullDraft() });
-    const r2 = parseDraft(badSavedAt);
-    expect(r2.ok).toBe(true);
-    if (r2.ok) expect(r2.savedAt).toBeNull();
+  it('savedAt 合法时原样返回保存时间', () => {
+    const savedAt = '2026-09-14T12:34:56.000Z';
+    const parsed = parseDraft(
+      JSON.stringify({ contractVersion: 1, savedAt, data: fullDraft() }),
+    );
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.savedAt).toBe(savedAt);
   });
 
   it('validateDraftData 直接拒绝非对象与结构不符的负载', () => {

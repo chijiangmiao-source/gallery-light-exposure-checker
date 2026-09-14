@@ -44,7 +44,7 @@ export interface DraftEnvelope {
 
 /** 解析结果：ok 为负载；corrupt 为结构损坏（含非法 JSON、版本不符、字段缺失 / 类型不符）。 */
 export type DraftParseResult =
-  | { ok: true; data: DraftData; savedAt: string | null }
+  | { ok: true; data: DraftData; savedAt: string }
   | { ok: false };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -94,8 +94,8 @@ export function serializeDraft(data: DraftData, savedAt: string): string {
 
 /**
  * 解析草稿 JSON 文本并按契约严格校验。
- * 任何损坏（非法 JSON、非对象、版本不符、字段缺失 / 类型不符）统一返回 { ok: false }，
- * 绝不抛出，调用方据此提示“草稿不可用”而非写入半成品。
+ * 任何损坏（非法 JSON、非对象、版本不符、字段缺失 / 类型不符、保存时间缺失或不可解析）
+ * 统一返回 { ok: false }，绝不抛出，调用方据此提示“草稿不可用”而非写入半成品。
  */
 export function parseDraft(text: string | null | undefined): DraftParseResult {
   if (typeof text !== 'string' || text.length === 0) return { ok: false };
@@ -107,10 +107,13 @@ export function parseDraft(text: string | null | undefined): DraftParseResult {
   }
   if (!isRecord(json)) return { ok: false };
   if (json.contractVersion !== DRAFT_CONTRACT_VERSION) return { ok: false };
-  const savedAt = isString(json.savedAt) ? json.savedAt : null;
+  // 保存时间为必填簿记字段：缺失、类型错误或不可解析均判草稿不可用
+  if (!isString(json.savedAt) || Number.isNaN(Date.parse(json.savedAt))) {
+    return { ok: false };
+  }
   const data = validateDraftData(json.data);
   if (!data) return { ok: false };
-  return { ok: true, data, savedAt };
+  return { ok: true, data, savedAt: json.savedAt };
 }
 
 /**
@@ -155,11 +158,11 @@ export function createBrowserDraftStorage(): DraftStorage | null {
   }
 }
 
-/** 存储读取结果：无记录、结构损坏（含版本不符）或可用草稿。 */
+/** 存储读取结果：无记录、结构损坏（含版本不符、保存时间损坏）或可用草稿。 */
 export type StoredDraft =
   | { status: 'absent' }
   | { status: 'corrupt' }
-  | { status: 'ok'; data: DraftData; savedAt: string | null };
+  | { status: 'ok'; data: DraftData; savedAt: string };
 
 /** 从存储读取草稿并区分“无记录 / 损坏 / 可用”（不抛异常）。 */
 export function loadDraft(storage: DraftStorage): StoredDraft {

@@ -91,7 +91,7 @@ const mismatchNotice = computed(() =>
 const draftStorage = ref<DraftStorage | null>(null);
 /** 启动时发现的结构合法草稿；在用户做出选择前不写入表单 */
 const pendingDraft = ref<DraftData | null>(null);
-const pendingSavedAt = ref<string | null>(null);
+const pendingSavedAt = ref<string>('');
 /** 启动时发现损坏 / 版本不受支持的草稿记录：提示不可用，拒绝写入表单 */
 const draftCorrupt = ref(false);
 
@@ -140,11 +140,9 @@ const draftSummary = computed(() => {
   if (!d) return null;
   const dash = '（未填写）';
   const dt = (v: string) => (v.trim() ? v.trim().replace('T', ' ') : dash);
-  let savedText = '';
-  if (pendingSavedAt.value) {
-    const t = new Date(pendingSavedAt.value);
-    if (!Number.isNaN(t.getTime())) savedText = fmtDateTime(t);
-  }
+  // 契约保证 savedAt 存在且可解析
+  const t = new Date(pendingSavedAt.value);
+  const savedText = Number.isNaN(t.getTime()) ? '' : fmtDateTime(t);
   return {
     name: d.name.trim() || dash,
     shiftStart: dt(d.shiftStart),
@@ -176,7 +174,7 @@ function restoreDraft(): void {
   capError.value = null;
   staleNotice.value = null;
   pendingDraft.value = null;
-  pendingSavedAt.value = null;
+  pendingSavedAt.value = '';
   // 恢复后继续自动保存当前输入
   persistNow();
 }
@@ -185,7 +183,7 @@ function restoreDraft(): void {
 function abandonDraft(): void {
   if (draftStorage.value) clearDraft(draftStorage.value);
   pendingDraft.value = null;
-  pendingSavedAt.value = null;
+  pendingSavedAt.value = '';
   draftCorrupt.value = false;
 }
 

@@ -592,10 +592,63 @@ const corruptDraftCases: [string, string][] = [
   ['非法 JSON', '{broken-json'],
   ['契约版本不受支持', JSON.stringify({ contractVersion: 99, savedAt: '', data: {} })],
   [
+    '缺少保存时间',
+    JSON.stringify({
+      contractVersion: 1,
+      data: {
+        name: '唐代绢画',
+        shiftStart: '2026-09-14T08:00',
+        shiftEnd: '2026-09-14T10:00',
+        limit: '120',
+        rows: [
+          { time: '2026-09-14T08:00', lux: '50' },
+          { time: '2026-09-14T10:00', lux: '50' },
+        ],
+        blackouts: [],
+      },
+    }),
+  ],
+  [
+    '保存时间类型错误',
+    JSON.stringify({
+      contractVersion: 1,
+      savedAt: 1726300000000,
+      data: {
+        name: '唐代绢画',
+        shiftStart: '2026-09-14T08:00',
+        shiftEnd: '2026-09-14T10:00',
+        limit: '120',
+        rows: [
+          { time: '2026-09-14T08:00', lux: '50' },
+          { time: '2026-09-14T10:00', lux: '50' },
+        ],
+        blackouts: [],
+      },
+    }),
+  ],
+  [
+    '保存时间不可解析',
+    JSON.stringify({
+      contractVersion: 1,
+      savedAt: 'not-a-date',
+      data: {
+        name: '唐代绢画',
+        shiftStart: '2026-09-14T08:00',
+        shiftEnd: '2026-09-14T10:00',
+        limit: '120',
+        rows: [
+          { time: '2026-09-14T08:00', lux: '50' },
+          { time: '2026-09-14T10:00', lux: '50' },
+        ],
+        blackouts: [],
+      },
+    }),
+  ],
+  [
     '字段缺失（行缺 lux、缺 blackouts）',
     JSON.stringify({
       contractVersion: 1,
-      savedAt: '',
+      savedAt: '2026-09-14T12:00:00.000Z',
       data: {
         name: '唐代绢画',
         shiftStart: '2026-09-14T08:00',
@@ -609,7 +662,7 @@ const corruptDraftCases: [string, string][] = [
     '类型不符（limit 为数字、blackouts 不是数组）',
     JSON.stringify({
       contractVersion: 1,
-      savedAt: '',
+      savedAt: '2026-09-14T12:00:00.000Z',
       data: {
         name: '唐代绢画',
         shiftStart: '2026-09-14T08:00',
