@@ -331,3 +331,75 @@ export function computeExposure(parsed: ParsedForm): ExposureResult {
     diffKind: pass ? 'remaining' : 'excess',
   };
 }
+
+// ---------------------------------------------------------------------------
+// 照度上限模拟
+// ---------------------------------------------------------------------------
+
+/** 校验模拟照度上限输入；合法时 cap 为解析值，否则 error 为提示文案。 */
+export function validateCapInput(value: string): { cap: Decimal | null; error: string | null } {
+  const v = value.trim();
+  if (!v) return { cap: null, error: '请填写模拟照度上限' };
+  const parsed = parseAmount2(v);
+  if (!parsed) return { cap: null, error: '模拟照度上限须为最多两位小数的非负数字' };
+  if (parsed.lt(LUX_MIN) || parsed.gt(LUX_MAX)) {
+    return { cap: null, error: '模拟照度上限须在 0 至 5000 lx 之间' };
+  }
+  return { cap: parsed, error: null };
+}
+
+/** 被上限压低的时间点（原照度 > 上限）。 */
+export interface CappedPoint {
+  /** 行号（0 起） */
+  index: number;
+  time: Date;
+  /** 原照度（用户原始输入文本） */
+  originalLuxText: string;
+  /** 压低后的照度文本（即上限） */
+  cappedLuxText: string;
+}
+
+export interface CapSimulation {
+  cap: Decimal;
+  /** 每行模拟后的照度文本（未触顶行保持原输入），用于“应用到表格”写回 */
+  cappedLuxTexts: string[];
+  /** 模拟结果的核算（复用十进制梯形积分与精确判定） */
+  result: ExposureResult;
+  /** 减少量 = 原精确总量 − 模拟精确总量，0.01 精度 */
+  reduction: Decimal;
+  /** 被压低的时间点 */
+  cappedPoints: CappedPoint[];
+}
+
+/**
+ * 模拟统一调低现场照度上限：每个时间点照度取原值与上限的较小值，
+ * 复用同一梯形积分与精确判定；减少量相对当前表格原值的精确总量计算。
+ */
+export function simulateCap(parsed: ParsedForm, cap: Decimal): CapSimulation {
+  const original = computeExposure(parsed);
+
+  const cappedRows: ParsedRow[] = parsed.rows.map((row) =>
+    row.lux.gt(cap) ? { ...row, lux: cap, luxText: cap.toString() } : row,
+  );
+  const result = computeExposure({ ...parsed, rows: cappedRows });
+
+  const cappedPoints: CappedPoint[] = [];
+  parsed.rows.forEach((row, i) => {
+    if (row.lux.gt(cap)) {
+      cappedPoints.push({
+        index: i,
+        time: row.time,
+        originalLuxText: row.luxText,
+        cappedLuxText: cap.toString(),
+      });
+    }
+  });
+
+  return {
+    cap,
+    cappedLuxTexts: cappedRows.map((row) => row.luxText),
+    result,
+    reduction: round2(original.totalRaw.minus(result.totalRaw)),
+    cappedPoints,
+  };
+}

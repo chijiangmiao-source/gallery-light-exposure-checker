@@ -1,9 +1,13 @@
+import { Decimal } from 'decimal.js';
 import { describe, expect, it } from 'vitest';
 import {
   computeExposure,
   countErrors,
   fmt2,
+  fmtDateTime,
   parseLocalDateTime,
+  simulateCap,
+  validateCapInput,
   validateForm,
   type FormInput,
 } from '../../src/lib/exposure';
@@ -334,5 +338,111 @@ describe('表单校验', () => {
     const { parsed, errors } = validateForm(form);
     expect(parsed).toBeNull();
     expect(errors.rowErrors[1].time).toBe('时间点须为精确到分钟的完整本地日期时间');
+  });
+});
+
+describe('照度上限模拟', () => {
+  describe('validateCapInput', () => {
+    it('空值报错', () => {
+      expect(validateCapInput('')).toEqual({ cap: null, error: '请填写模拟照度上限' });
+      expect(validateCapInput('   ')).toEqual({ cap: null, error: '请填写模拟照度上限' });
+    });
+
+    it('格式非法报错：非数字、负数、小数位过多', () => {
+      expect(validateCapInput('abc').error).toBe('模拟照度上限须为最多两位小数的非负数字');
+      expect(validateCapInput('-1').error).toBe('模拟照度上限须为最多两位小数的非负数字');
+      expect(validateCapInput('1.234').error).toBe('模拟照度上限须为最多两位小数的非负数字');
+    });
+
+    it('超出 0 – 5000 lx 范围报错', () => {
+      expect(validateCapInput('5000.01').error).toBe('模拟照度上限须在 0 至 5000 lx 之间');
+    });
+
+    it('边界值 0 与 5000、两位小数均合法', () => {
+      expect(validateCapInput('0').cap?.toString()).toBe('0');
+      expect(validateCapInput('5000').cap?.toString()).toBe('5000');
+      expect(validateCapInput('150.55').cap?.toString()).toBe('150.55');
+    });
+  });
+
+  describe('simulateCap', () => {
+    it('封顶：仅高于上限的时间点被压低，总量与减少量精确', () => {
+      // 跨日表单 100/200/100，原总量 600；上限 150 仅压低中间点
+      const { parsed } = validateForm(crossDayForm('500'));
+      const sim = simulateCap(parsed!, new Decimal(150));
+
+      expect(sim.cappedPoints).toHaveLength(1);
+      expect(sim.cappedPoints[0].index).toBe(1);
+      expect(sim.cappedPoints[0].originalLuxText).toBe('200');
+      expect(sim.cappedPoints[0].cappedLuxText).toBe('150');
+      expect(fmtDateTime(sim.cappedPoints[0].time)).toBe('2026-09-15 00:00');
+
+      // (100+150)/2 × 120/60 + (150+100)/2 × 120/60 = 250 + 250 = 500
+      expect(sim.result.totalRaw.toString()).toBe('500');
+      expect(fmt2(sim.result.total)).toBe('500.00');
+      expect(sim.result.pass).toBe(true);
+      expect(sim.result.diffKind).toBe('remaining');
+      expect(fmt2(sim.reduction)).toBe('100.00');
+
+      // 写回文本：触顶行为上限，未触顶行保持原输入
+      expect(sim.cappedLuxTexts).toEqual(['100', '150', '100']);
+    });
+
+    it('未触顶：上限不低于所有照度时无压低、总量与减少量为零', () => {
+      // 上限 200 等于最大照度（不触发压低，因为判定为“大于”）
+      const { parsed } = validateForm(crossDayForm('600'));
+      const sim = simulateCap(parsed!, new Decimal(200));
+
+      expect(sim.cappedPoints).toHaveLength(0);
+      expect(sim.result.totalRaw.toString()).toBe('600');
+      expect(fmt2(sim.result.total)).toBe('600.00');
+      expect(fmt2(sim.reduction)).toBe('0.00');
+      expect(sim.cappedLuxTexts).toEqual(['100', '200', '100']);
+    });
+
+    it('精确总量与判定复用未舍入值：模拟后略低于限额判合格', () => {
+      // 0.42/0.29 lx 各 2 分钟：原精确总量 (0.42+0.29)/2 × 2/60 = 0.0118333… > 0.01 超限
+      const form: FormInput = {
+        name: '纸质文献',
+        shiftStart: '2026-09-14T10:00',
+        shiftEnd: '2026-09-14T10:02',
+        limit: '0.01',
+        rows: [
+          { time: '2026-09-14T10:00', lux: '0.42' },
+          { time: '2026-09-14T10:02', lux: '0.29' },
+        ],
+      };
+      const { parsed } = validateForm(form);
+      expect(computeExposure(parsed!).pass).toBe(false);
+
+      // 上限 0.3 仅压低首点：模拟精确总量 (0.3+0.29)/2 × 2/60 = 0.0098333… < 0.01 合格
+      const sim = simulateCap(parsed!, new Decimal('0.3'));
+      expect(sim.cappedPoints).toHaveLength(1);
+      expect(sim.cappedLuxTexts).toEqual(['0.3', '0.29']);
+      expect(sim.result.totalRaw.toString()).toMatch(/^0\.00983333/);
+      expect(fmt2(sim.result.total)).toBe('0.01');
+      expect(sim.result.pass).toBe(true);
+      // 减少量 0.0118333… − 0.0098333… = 0.002 → 0.01 精度显示 0.00
+      expect(fmt2(sim.reduction)).toBe('0.00');
+    });
+
+    it('精确总量略高于限额时模拟仍判超限', () => {
+      // 0.42 lx × 2 min：上限 0.42 未触顶，精确总量 0.014 > 0.01 仍超限
+      const form: FormInput = {
+        name: '漆器',
+        shiftStart: '2026-09-14T10:00',
+        shiftEnd: '2026-09-14T10:02',
+        limit: '0.01',
+        rows: [
+          { time: '2026-09-14T10:00', lux: '0.42' },
+          { time: '2026-09-14T10:02', lux: '0.42' },
+        ],
+      };
+      const { parsed } = validateForm(form);
+      const sim = simulateCap(parsed!, new Decimal('0.42'));
+      expect(sim.result.totalRaw.toString()).toBe('0.014');
+      expect(sim.result.pass).toBe(false);
+      expect(sim.result.diffKind).toBe('excess');
+    });
   });
 });

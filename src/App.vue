@@ -4,7 +4,10 @@ import ResultPanel from './components/ResultPanel.vue';
 import {
   computeExposure,
   countErrors,
+  simulateCap,
+  validateCapInput,
   validateForm,
+  type CapSimulation,
   type ExposureResult,
   type FormErrors,
   type FormInput,
@@ -25,6 +28,10 @@ const errors = ref<FormErrors | null>(null);
 const result = ref<ExposureResult | null>(null);
 const resultName = ref('');
 
+// 模拟照度上限：控件旁反馈与最近一次有效模拟
+const capError = ref<string | null>(null);
+const simulation = ref<CapSimulation | null>(null);
+
 const errorCount = computed(() => (errors.value ? countErrors(errors.value) : 0));
 
 function rowHasError(index: number): boolean {
@@ -34,14 +41,18 @@ function rowHasError(index: number): boolean {
 
 function addRow(): void {
   form.rows.push({ time: '', lux: '' });
-  // 行结构变化后旧错误索引不再对应，清除标记待下次提交重判
+  // 行结构变化后旧错误索引不再对应，清除标记待下次提交重判；既有模拟的行号同样失效
   errors.value = null;
+  simulation.value = null;
+  capError.value = null;
 }
 
 function removeRow(index: number): void {
   if (form.rows.length > 2) {
     form.rows.splice(index, 1);
     errors.value = null;
+    simulation.value = null;
+    capError.value = null;
   }
 }
 
@@ -51,10 +62,43 @@ function submit(): void {
     errors.value = null;
     result.value = computeExposure(outcome.parsed);
     resultName.value = outcome.parsed.name;
+    // 新正式结论生成后，此前基于旧表格的模拟不再适用
+    simulation.value = null;
+    capError.value = null;
   } else {
     // 合并标出全部错误行；保留输入，不更新旧结论
     errors.value = outcome.errors;
   }
+}
+
+function simulate(capText: string): void {
+  const { cap, error } = validateCapInput(capText);
+  if (!cap) {
+    // 非法上限：仅在模拟控件旁反馈，不改表格、正式结论与最近一次有效模拟
+    capError.value = error;
+    return;
+  }
+  const outcome = validateForm(form);
+  if (!outcome.parsed) {
+    capError.value = '表格录入存在错误，请先修正并核算后再模拟';
+    return;
+  }
+  // 表格已通过完整校验，旧的错误标记随之失效
+  errors.value = null;
+  capError.value = null;
+  simulation.value = simulateCap(outcome.parsed, cap);
+}
+
+function applySimulation(): void {
+  const sim = simulation.value;
+  if (!sim) return;
+  // 把模拟后的照度写回当前各行；班次、限额和展品名保持不变
+  sim.cappedLuxTexts.forEach((lux, i) => {
+    if (i < form.rows.length) form.rows[i].lux = lux;
+  });
+  // 清除模拟结果；正式结论待用户再按原核算按钮生成
+  simulation.value = null;
+  capError.value = null;
 }
 </script>
 
@@ -196,7 +240,15 @@ function submit(): void {
       </form>
     </section>
 
-    <ResultPanel v-if="result" :result="result" :name="resultName" />
+    <ResultPanel
+      v-if="result"
+      :result="result"
+      :name="resultName"
+      :simulation="simulation"
+      :cap-error="capError"
+      @simulate="simulate"
+      @apply="applySimulation"
+    />
   </main>
 </template>
 
