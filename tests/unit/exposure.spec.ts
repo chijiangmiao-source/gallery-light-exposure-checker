@@ -182,6 +182,28 @@ describe('判定与差额', () => {
     expect(fmt2(result.diff)).toBe('0.00');
   });
 
+  it('精确总量略高于限额但舍入后相等时，仍判超限', () => {
+    // 0.42 lx × 2 min → 0.014：舍入显示 0.01 与限额相等，但精确值 0.014 > 0.01
+    const { parsed } = validateForm(twoMinuteForm('0.42', '0.01'));
+    const result = computeExposure(parsed!);
+    expect(result.totalRaw.toString()).toBe('0.014');
+    expect(fmt2(result.total)).toBe('0.01');
+    expect(result.pass).toBe(false);
+    expect(result.diffKind).toBe('excess');
+    // 超出量 0.004 按同一 0.01 规则显示为 0.00
+    expect(fmt2(result.diff)).toBe('0.00');
+  });
+
+  it('精确总量略低于限额但舍入后相等时，判合格', () => {
+    // 0.29 lx × 2 min → 0.009666…：舍入显示 0.01 与限额相等，精确值低于限额
+    const { parsed } = validateForm(twoMinuteForm('0.29', '0.01'));
+    const result = computeExposure(parsed!);
+    expect(fmt2(result.total)).toBe('0.01');
+    expect(result.pass).toBe(true);
+    expect(result.diffKind).toBe('remaining');
+    expect(fmt2(result.diff)).toBe('0.00');
+  });
+
   it('总量超出限额 0.01 判超限，超出量 0.01', () => {
     const { parsed } = validateForm(twoMinuteForm('0.6', '0.01'));
     const result = computeExposure(parsed!);

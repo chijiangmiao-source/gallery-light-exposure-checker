@@ -6,7 +6,8 @@ import { Decimal } from 'decimal.js';
  * 规则：
  * - 相邻区间暴露量 = (前值 + 后值) ÷ 2 × 分钟差 ÷ 60，使用 decimal.js 十进制定点运算；
  * - 各段与总量展示时四舍五入到 0.01 lx·h，但总量必须先累加未舍入段值再舍入；
- * - 总量 ≤ 限额判合格，否则超限；剩余额 / 超出量按同一 0.01 规则展示。
+ * - 判定以未舍入的精确总量为准：精确总量 ≤ 限额判合格，否则超限（即使舍入后的
+ *   显示值与限额相等）；剩余额 / 超出量按同一 0.01 规则展示。
  */
 
 export const LUX_MIN = new Decimal(0);
@@ -316,8 +317,9 @@ export function computeExposure(parsed: ParsedForm): ExposureResult {
   }
 
   const total = round2(totalRaw);
-  const pass = total.lte(parsed.limit);
-  const diff = pass ? parsed.limit.minus(total) : total.minus(parsed.limit);
+  // 判定使用未舍入的精确总量：略高于限额即超限，即使舍入后的显示值与限额相等
+  const pass = totalRaw.lte(parsed.limit);
+  const diff = pass ? parsed.limit.minus(totalRaw) : totalRaw.minus(parsed.limit);
 
   return {
     segments,

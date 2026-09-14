@@ -102,6 +102,25 @@ test('非法提交：合并标出对应行、保留输入且不更新旧结论',
   await expect(page.getByTestId('total')).toHaveText('120.00');
 });
 
+test('临界判定：精确总量略超限额、舍入后相等时判超限', async ({ page }) => {
+  // 0.42 lx × 2 min → 精确总量 0.014，舍入显示 0.01 与限额相等，但应判超限
+  await page.getByTestId('exhibit-name').fill('纸质文献');
+  await page.getByTestId('shift-start').fill('2026-09-14T10:00');
+  await page.getByTestId('shift-end').fill('2026-09-14T10:02');
+  await page.getByTestId('limit').fill('0.01');
+
+  await fillRow(page, 0, '2026-09-14T10:00', '0.42');
+  await fillRow(page, 1, '2026-09-14T10:02', '0.42');
+
+  await page.getByTestId('submit').click();
+
+  await expect(page.getByTestId('verdict')).toHaveText('超限');
+  await expect(page.getByTestId('total')).toHaveText('0.01');
+  await expect(page.getByTestId('limit-value')).toHaveText('0.01');
+  await expect(page.getByTestId('diff-label')).toHaveText('超出量');
+  await expect(page.getByTestId('diff')).toHaveText('0.00');
+});
+
 test('表格行可删除，且至少保留两行', async ({ page }) => {
   await page.getByTestId('add-row').click();
   await expect(page.getByTestId('point-row')).toHaveCount(3);
