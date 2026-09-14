@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { DRAFT_STORAGE_KEY } from '../../src/lib/draft';
 
 async function fillRow(page: Page, index: number, time: string, lux: string) {
   const row = page.getByTestId('point-row').nth(index);
@@ -483,4 +484,196 @@ test('非法停照区间：合并标出、保留编辑内容且不污染旧结�
   await expect(page.getByTestId('deducted')).toHaveText('32.50');
   await expect(page.getByTestId('diff-label')).toHaveText('剩余额');
   await expect(page.getByTestId('diff')).toHaveText('32.50');
+});
+
+// ---------------------------------------------------------------------------
+// 浏览器草稿：自动保存、恢复提示、放弃与损坏拒绝
+// ---------------------------------------------------------------------------
+
+/** 填写一份较长的班次录入（含停照区间），但不点击核算。 */
+async function fillLongShiftDraft(page: Page) {
+  await page.getByTestId('exhibit-name').fill('唐代绢画');
+  await page.getByTestId('shift-start').fill('2026-09-14T08:00');
+  await page.getByTestId('shift-end').fill('2026-09-14T10:00');
+  await page.getByTestId('limit').fill('120');
+  await page.getByTestId('add-row').click();
+  await fillRow(page, 0, '2026-09-14T08:00', '50');
+  await fillRow(page, 1, '2026-09-14T09:00', '70');
+  await fillRow(page, 2, '2026-09-14T10:00', '50');
+  await page.getByTestId('add-blackout').click();
+  await page.getByTestId('blackout-start').fill('2026-09-14T08:30');
+  await page.getByTestId('blackout-end').fill('2026-09-14T09:00');
+}
+
+async function expectInitialForm(page: Page) {
+  await expect(page.getByTestId('exhibit-name')).toHaveValue('');
+  await expect(page.getByTestId('shift-start')).toHaveValue('');
+  await expect(page.getByTestId('limit')).toHaveValue('');
+  await expect(page.getByTestId('point-row')).toHaveCount(2);
+  await expect(page.getByTestId('blackout-row')).toHaveCount(0);
+  await expect(page.getByTestId('verdict')).toHaveCount(0);
+}
+
+async function expectRestoredForm(page: Page) {
+  await expect(page.getByTestId('exhibit-name')).toHaveValue('唐代绢画');
+  await expect(page.getByTestId('shift-start')).toHaveValue('2026-09-14T08:00');
+  await expect(page.getByTestId('shift-end')).toHaveValue('2026-09-14T10:00');
+  await expect(page.getByTestId('limit')).toHaveValue('120');
+  await expect(page.getByTestId('point-row')).toHaveCount(3);
+  const rows = page.getByTestId('point-row');
+  await expect(rows.nth(0).getByTestId('time-input')).toHaveValue('2026-09-14T08:00');
+  await expect(rows.nth(0).getByTestId('lux-input')).toHaveValue('50');
+  await expect(rows.nth(1).getByTestId('lux-input')).toHaveValue('70');
+  await expect(rows.nth(2).getByTestId('time-input')).toHaveValue('2026-09-14T10:00');
+  await expect(page.getByTestId('blackout-row')).toHaveCount(1);
+  await expect(page.getByTestId('blackout-start')).toHaveValue('2026-09-14T08:30');
+  await expect(page.getByTestId('blackout-end')).toHaveValue('2026-09-14T09:00');
+}
+
+test('草稿：录入后刷新先展示摘要，选择恢复草稿后再核算生成结论', async ({ page }) => {
+  await fillLongShiftDraft(page);
+
+  // 自动保存已落盘（未点核算）
+  await page.reload();
+
+  // 先展示摘要；此时初始表单未被替换，也没有旧结论 / 模拟
+  const prompt = page.getByTestId('draft-prompt');
+  await expect(prompt).toBeVisible();
+  await expect(page.getByTestId('draft-summary')).toContainText('唐代绢画');
+  await expect(page.getByTestId('draft-summary')).toContainText('3 行');
+  await expect(page.getByTestId('draft-summary')).toContainText('停照区间');
+  await expectInitialForm(page);
+
+  // 恢复草稿：替换录入表单，但不带回旧结论或模拟方案
+  await page.getByTestId('draft-restore').click();
+  await expect(prompt).toHaveCount(0);
+  await expectRestoredForm(page);
+  await expect(page.getByTestId('verdict')).toHaveCount(0);
+  await expect(page.getByTestId('simulation')).toHaveCount(0);
+
+  // 仍通过原核算操作校验并生成结论（停照扣除 32.50，有效总量 87.50 合格）
+  await page.getByTestId('submit').click();
+  await expect(page.getByTestId('verdict')).toHaveText('合格');
+  await expect(page.getByTestId('total')).toHaveText('87.50');
+  await expect(page.getByTestId('deducted')).toHaveText('32.50');
+  await expect(page.getByTestId('diff-label')).toHaveText('剩余额');
+  await expect(page.getByTestId('diff')).toHaveText('32.50');
+
+  // 完成合法核算后继续保存当前输入：再次刷新仍可恢复到最新录入
+  await page.reload();
+  await expect(page.getByTestId('draft-prompt')).toBeVisible();
+  await page.getByTestId('draft-restore').click();
+  await expectRestoredForm(page);
+  await expect(page.getByTestId('verdict')).toHaveCount(0);
+});
+
+test('草稿：放弃草稿清空记录并保留当前页面，再次进入不再提示', async ({ page }) => {
+  await fillLongShiftDraft(page);
+  await page.reload();
+  await expect(page.getByTestId('draft-prompt')).toBeVisible();
+
+  await page.getByTestId('draft-discard').click();
+  await expect(page.getByTestId('draft-prompt')).toHaveCount(0);
+
+  // 当前页面内容保留为初始表单（未被草稿覆盖）
+  await expectInitialForm(page);
+
+  // 记录已清除
+  expect(await page.evaluate((key) => localStorage.getItem(key), DRAFT_STORAGE_KEY)).toBeNull();
+
+  // 再次进入：未检测到草稿，启动行为与现有版本一致
+  await page.reload();
+  await expect(page.getByTestId('draft-prompt')).toHaveCount(0);
+  await expect(page.getByTestId('draft-corrupt')).toHaveCount(0);
+  await expectInitialForm(page);
+});
+
+const corruptDraftCases: [string, string][] = [
+  ['非法 JSON', '{broken-json'],
+  ['契约版本不受支持', JSON.stringify({ contractVersion: 99, savedAt: '', data: {} })],
+  [
+    '字段缺失（行缺 lux、缺 blackouts）',
+    JSON.stringify({
+      contractVersion: 1,
+      savedAt: '',
+      data: {
+        name: '唐代绢画',
+        shiftStart: '2026-09-14T08:00',
+        shiftEnd: '2026-09-14T10:00',
+        limit: '120',
+        rows: [{ time: '2026-09-14T08:00' }, { time: '2026-09-14T10:00' }],
+      },
+    }),
+  ],
+  [
+    '类型不符（limit 为数字、blackouts 不是数组）',
+    JSON.stringify({
+      contractVersion: 1,
+      savedAt: '',
+      data: {
+        name: '唐代绢画',
+        shiftStart: '2026-09-14T08:00',
+        shiftEnd: '2026-09-14T10:00',
+        limit: 120,
+        rows: [
+          { time: '2026-09-14T08:00', lux: '50' },
+          { time: '2026-09-14T10:00', lux: '50' },
+        ],
+        blackouts: {},
+      },
+    }),
+  ],
+];
+
+for (const [label, corruptText] of corruptDraftCases) {
+  test(`草稿：${label}的记录不覆盖初始表单，提示不可用并可放弃清除`, async ({ page }) => {
+    // 在页面脚本执行前注入记录（仅首次，避免放弃后刷新又被重新注入）
+    await page.addInitScript(
+      ([key, value]) => {
+        if (sessionStorage.getItem('draft-seeded')) return;
+        sessionStorage.setItem('draft-seeded', '1');
+        localStorage.setItem(key, value);
+      },
+      [DRAFT_STORAGE_KEY, corruptText] as const,
+    );
+    await page.reload();
+
+    await expect(page.getByTestId('draft-corrupt')).toBeVisible();
+    await expectInitialForm(page);
+    await expect(page.getByTestId('draft-prompt')).toHaveCount(0);
+
+    // 放弃草稿：提示消失，记录被清除，初始表单保持不变
+    await page.getByTestId('draft-discard-corrupt').click();
+    await expect(page.getByTestId('draft-corrupt')).toHaveCount(0);
+    await expectInitialForm(page);
+    expect(await page.evaluate((key) => localStorage.getItem(key), DRAFT_STORAGE_KEY)).toBeNull();
+
+    // 再次进入：无任何草稿提示，启动行为与现有版本一致
+    await page.reload();
+    await expect(page.getByTestId('draft-corrupt')).toHaveCount(0);
+    await expect(page.getByTestId('draft-prompt')).toHaveCount(0);
+    await expectInitialForm(page);
+  });
+}
+
+test('草稿：录入中途的半成品也会自动保存，恢复后按原校验标出错误', async ({ page }) => {
+  // 仅填写部分字段，模拟刷新 / 关闭中断
+  await page.getByTestId('exhibit-name').fill('唐代绢画');
+  await page.getByTestId('shift-start').fill('2026-09-14T08:00');
+  await page.getByTestId('point-row').nth(0).getByTestId('lux-input').fill('50');
+  await page.reload();
+
+  await expect(page.getByTestId('draft-prompt')).toBeVisible();
+  await page.getByTestId('draft-restore').click();
+
+  await expect(page.getByTestId('exhibit-name')).toHaveValue('唐代绢画');
+  await expect(page.getByTestId('shift-start')).toHaveValue('2026-09-14T08:00');
+  await expect(page.getByTestId('shift-end')).toHaveValue('');
+  await expect(page.getByTestId('point-row').nth(0).getByTestId('lux-input')).toHaveValue('50');
+
+  // 恢复不产生结论；提交半成品时走原校验，合并标出错误且无结论
+  await expect(page.getByTestId('verdict')).toHaveCount(0);
+  await page.getByTestId('submit').click();
+  await expect(page.getByTestId('error-summary')).toBeVisible();
+  await expect(page.getByTestId('verdict')).toHaveCount(0);
 });

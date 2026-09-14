@@ -1,9 +1,19 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import ResultPanel from './components/ResultPanel.vue';
+import {
+  clearDraft,
+  createBrowserDraftStorage,
+  draftHasContent,
+  loadDraft,
+  saveDraft,
+  type DraftData,
+  type DraftStorage,
+} from './lib/draft';
 import {
   computeExposure,
   countErrors,
+  fmtDateTime,
   simulateCap,
   simulationBasis,
   validateCapInput,
@@ -72,6 +82,135 @@ const mismatchNotice = computed(() =>
     ? '模拟照度上限已改为新数值但尚未重新模拟，请先点击「模拟」生成新方案，或改回原上限后再应用'
     : null,
 );
+
+// ---------------------------------------------------------------------------
+// 浏览器草稿：录入内容自动保存，刷新 / 关闭后再次进入可选择恢复
+// ---------------------------------------------------------------------------
+
+/** localStorage 适配；浏览器禁用存储时为 null，草稿功能静默停用，其余行为不变 */
+const draftStorage = ref<DraftStorage | null>(null);
+/** 启动时发现的结构合法草稿；在用户做出选择前不写入表单 */
+const pendingDraft = ref<DraftData | null>(null);
+const pendingSavedAt = ref<string | null>(null);
+/** 启动时发现损坏 / 版本不受支持的草稿记录：提示不可用，拒绝写入表单 */
+const draftCorrupt = ref(false);
+
+function draftDecisionPending(): boolean {
+  return pendingDraft.value !== null || draftCorrupt.value;
+}
+
+function collectDraft(): DraftData {
+  return {
+    name: form.name,
+    shiftStart: form.shiftStart,
+    shiftEnd: form.shiftEnd,
+    limit: form.limit,
+    rows: form.rows.map((r) => ({ time: r.time, lux: r.lux })),
+    blackouts: (form.blackouts ?? []).map((b) => ({ start: b.start, end: b.end })),
+  };
+}
+
+/** 立即持久化当前输入；恢复决定未做出时不得覆盖存储中的旧草稿；空表单清除记录 */
+function persistNow(): void {
+  const storage = draftStorage.value;
+  if (!storage || draftDecisionPending()) return;
+  const data = collectDraft();
+  if (draftHasContent(data)) {
+    saveDraft(storage, data, new Date().toISOString());
+  } else {
+    clearDraft(storage);
+  }
+}
+
+/** pagehide（刷新 / 关闭页面）时保存：尚未决定恢复与否则保留原记录；空表单则清除记录 */
+function persistOnHide(): void {
+  const storage = draftStorage.value;
+  if (!storage || draftDecisionPending()) return;
+  const data = collectDraft();
+  if (draftHasContent(data)) {
+    saveDraft(storage, data, new Date().toISOString());
+  } else {
+    clearDraft(storage);
+  }
+}
+
+/** 摘要：用户决定恢复前先看到草稿概况（不触碰表单） */
+const draftSummary = computed(() => {
+  const d = pendingDraft.value;
+  if (!d) return null;
+  const dash = '（未填写）';
+  const dt = (v: string) => (v.trim() ? v.trim().replace('T', ' ') : dash);
+  let savedText = '';
+  if (pendingSavedAt.value) {
+    const t = new Date(pendingSavedAt.value);
+    if (!Number.isNaN(t.getTime())) savedText = fmtDateTime(t);
+  }
+  return {
+    name: d.name.trim() || dash,
+    shiftStart: dt(d.shiftStart),
+    shiftEnd: dt(d.shiftEnd),
+    limit: d.limit.trim() || dash,
+    rowCount: d.rows.length,
+    filledTimes: d.rows.filter((r) => r.time.trim() !== '').length,
+    filledLux: d.rows.filter((r) => r.lux.trim() !== '').length,
+    blackoutCount: d.blackouts.length,
+    savedText,
+  };
+});
+
+/** 恢复草稿：仅替换录入字段；旧结论、模拟方案、错误标记一律不带回，仍走原核算校验 */
+function restoreDraft(): void {
+  const d = pendingDraft.value;
+  if (!d) return;
+  form.name = d.name;
+  form.shiftStart = d.shiftStart;
+  form.shiftEnd = d.shiftEnd;
+  form.limit = d.limit;
+  form.rows.splice(0, form.rows.length, ...d.rows.map((r) => ({ time: r.time, lux: r.lux })));
+  form.blackouts = d.blackouts.map((b) => ({ start: b.start, end: b.end }));
+  result.value = null;
+  resultName.value = '';
+  errors.value = null;
+  simulation.value = null;
+  capText.value = '';
+  capError.value = null;
+  staleNotice.value = null;
+  pendingDraft.value = null;
+  pendingSavedAt.value = null;
+  // 恢复后继续自动保存当前输入
+  persistNow();
+}
+
+/** 放弃草稿：清除存储记录；初始表单（或当前页面内容）保持不变 */
+function abandonDraft(): void {
+  if (draftStorage.value) clearDraft(draftStorage.value);
+  pendingDraft.value = null;
+  pendingSavedAt.value = null;
+  draftCorrupt.value = false;
+}
+
+// 录入即自动保存（深度监听）；恢复决定未做出前跳过，避免覆盖待决草稿
+watch(form, persistNow, { deep: true });
+
+onMounted(() => {
+  const storage = createBrowserDraftStorage();
+  draftStorage.value = storage;
+  if (!storage) return;
+  const stored = loadDraft(storage);
+  if (stored.status === 'ok' && draftHasContent(stored.data)) {
+    // 有内容的合法草稿：先展示摘要，由用户选择恢复或放弃（此前不触碰表单）
+    pendingDraft.value = stored.data;
+    pendingSavedAt.value = stored.savedAt;
+  } else if (stored.status === 'corrupt') {
+    // 损坏 / 版本不受支持：不写入表单，仅提示草稿不可用
+    draftCorrupt.value = true;
+  }
+  window.addEventListener('pagehide', persistOnHide);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('pagehide', persistOnHide);
+});
 
 function rowHasError(index: number): boolean {
   const rowErrors = errors.value?.rowErrors[index];
@@ -175,6 +314,53 @@ function applySimulation(): void {
       <h1>展品照度暴露核算台</h1>
       <p class="subtitle">闭馆交接班次 · 敏感展品当班暴露量核算（数据仅在本地浏览器处理）</p>
     </header>
+
+    <section
+      v-if="pendingDraft && draftSummary"
+      class="card draft-card"
+      data-testid="draft-prompt"
+      role="dialog"
+      aria-labelledby="draft-prompt-title"
+    >
+      <h2 id="draft-prompt-title">发现未完成的录入草稿</h2>
+      <p class="hint" v-if="draftSummary.savedText">保存于 {{ draftSummary.savedText }}</p>
+      <dl class="draft-summary" data-testid="draft-summary">
+        <div><dt>展品名</dt><dd>{{ draftSummary.name }}</dd></div>
+        <div><dt>班次</dt><dd>{{ draftSummary.shiftStart }} → {{ draftSummary.shiftEnd }}</dd></div>
+        <div><dt>允许暴露量</dt><dd>{{ draftSummary.limit }}</dd></div>
+        <div>
+          <dt>时间点与照度</dt>
+          <dd>{{ draftSummary.rowCount }} 行（已填时间点 {{ draftSummary.filledTimes }} / 照度 {{ draftSummary.filledLux }}）</dd>
+        </div>
+        <div><dt>停照区间</dt><dd>{{ draftSummary.blackoutCount }} 个</dd></div>
+      </dl>
+      <p class="hint">
+        恢复草稿只会替换下方录入内容，不会带回此前结论或模拟方案；恢复后请重新点击「核算」。
+      </p>
+      <div class="actions">
+        <button type="button" class="primary" data-testid="draft-restore" @click="restoreDraft">
+          恢复草稿
+        </button>
+        <button type="button" data-testid="draft-discard" @click="abandonDraft">放弃草稿</button>
+      </div>
+    </section>
+
+    <section
+      v-else-if="draftCorrupt"
+      class="card draft-card corrupt"
+      data-testid="draft-corrupt"
+      role="alert"
+    >
+      <h2>浏览器中的录入草稿不可用</h2>
+      <p class="error-text">
+        草稿数据已损坏、字段缺失或来自不支持的版本，为避免覆盖当前表单，未载入任何内容。
+      </p>
+      <div class="actions">
+        <button type="button" data-testid="draft-discard-corrupt" @click="abandonDraft">
+          放弃草稿
+        </button>
+      </div>
+    </section>
 
     <section class="card">
       <form novalidate @submit.prevent="submit">
@@ -564,6 +750,42 @@ button:disabled {
   border: 1px solid #c0392b;
   border-radius: 6px;
   background: #fdf3f2;
+  color: #c0392b;
+  font-size: 14px;
+}
+
+.draft-card {
+  border-color: #1f5f8b;
+  background: #f4f8fb;
+}
+
+.draft-card.corrupt {
+  border-color: #c0392b;
+  background: #fdf3f2;
+}
+
+.draft-card h2 {
+  margin-top: 0;
+}
+
+.draft-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px 24px;
+  margin: 10px 0;
+  font-size: 14px;
+}
+
+.draft-summary dt {
+  font-size: 12.5px;
+  color: #5c6670;
+}
+
+.draft-summary dd {
+  margin: 2px 0 0;
+}
+
+.error-text {
   color: #c0392b;
   font-size: 14px;
 }
